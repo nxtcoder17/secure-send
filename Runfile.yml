@@ -1,30 +1,37 @@
-version: 3
-
-vars:
+env:
   binary: ./bin/secure-send
 
 tasks:
+  dev:
+    cmd:
+      - go run ./main.go --debug
+
   go:build:
     silent: true
+    env:
+      platform_arch:
+        sh: go env GOARCH
+      built_at:
+        sh: date | sed 's/\s/_/g'
     vars:
       platform_arch: 
         sh: go env GOARCH
       built_at:
-        sh: date | sed 's/\s/_/g'
+        sh: 
     env:
       GOARCH: "{{ .GOARCH | default .platform_arch }}"
     cmds:
       - go build -ldflags="-s -w -X main.BuiltAt={{.built_at}}" -o {{.binary}}-$GOARCH .
 
   container:build-and-push:
-    requires:
-      vars:
-        - image
-    cmds:
-      - task: go:build
+    env:
+      image:
+        required: true
+    cmd:
+      - run: go:build
         vars:
           GOARCH: amd64
-      - task: go:build
+      - run: go:build
         vars:
           GOARCH: arm64
       # - nerdctl build --platform linux/amd64,linux/arm64 --build-arg BINARY="{{.binary}}" --output=type=image,force-compression=true,compression=zstd,compression-level=12,push=true -t {{.image}} .

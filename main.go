@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/md5"
 	"errors"
 	"flag"
@@ -24,10 +25,15 @@ type Distributor struct {
 	mu sync.Mutex
 }
 
-var BuiltAt string
+var (
+	BuiltAt string
+
+	// to be set by runtime flags
+	debug bool
+)
 
 func (d *Distributor) Send(b []byte) {
-	//  INFO: this data must be copied to another []byte first
+	// INFO: this data must be copied to another []byte first
 	// [go io.Writer](https://pkg.go.dev/io#Writer)
 	// [stack overflow](https://stackoverflow.com/a/41250437)
 	t := make([]byte, len(b))
@@ -60,26 +66,26 @@ func NewDistributor() *Distributor {
 		mu: sync.Mutex{},
 	}
 
-	// d.debug = true
-	//
-	// var err error
-	// d.debugSender, err = os.Create("_send_debug.log")
-	// if err != nil {
-	// 	panic(err)
-	// }
-	// d.debugReceiver, err = os.Create("_receive_debug.log")
-	// if err != nil {
-	// 	panic(err)
-	// }
-	//
+	if debug {
+		d.debug = true
+
+		var err error
+		d.debugSender, err = os.Create("_send_debug.log")
+		if err != nil {
+			panic(err)
+		}
+		d.debugReceiver, err = os.Create("_receive_debug.log")
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	return d
 }
 
 func main() {
 	var addr string
 	flag.StringVar(&addr, "addr", ":7890", "--addr [host:]port")
-
-	var debug bool
 	flag.BoolVar(&debug, "debug", false, "--debug")
 	flag.Parse()
 
@@ -103,6 +109,10 @@ func main() {
 		token := r.PathValue("token")
 
 		wait := r.URL.Query().Get("wait")
+		if wait == "" {
+			wait = "10s"
+		}
+
 		waitDuration, err := time.ParseDuration(wait)
 		if err != nil {
 			http.Error(w, "bad wait time, must be a valid go time.Duration", http.StatusBadRequest)
@@ -116,25 +126,36 @@ func main() {
 
 		logger.Debug("sender active", "token", token)
 
-		logger.Info("parsing multipart form")
-		start := time.Now()
+		var reader io.Reader
 
-		// r.Body = http.MaxBytesReader(w, r.Body, 32<<20+512)
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			logger.Error("unable to parse form, got", "err", err)
-			http.Error(w, "Unable to parse form", http.StatusBadRequest)
-			return
-		}
-		logger.Info("parsed multipart form", "took", fmt.Sprintf("%.2fs", time.Since(start).Seconds()))
+		switch r.URL.Query().Get("type") {
+		case "form":
+			{
+				logger.Info("parsing multipart form")
+				start := time.Now()
 
-		// Retrieve the file from the form
-		file, fh, err := r.FormFile("file")
-		if err != nil {
-			http.Error(w, "Error retrieving the file", http.StatusBadRequest)
-			return
+				// r.Body = http.MaxBytesReader(w, r.Body, 32<<20+512)
+				if err := r.ParseMultipartForm(32 << 20); err != nil {
+					logger.Error("unable to parse form, got", "err", err)
+					http.Error(w, "Unable to parse form", http.StatusBadRequest)
+					return
+				}
+				logger.Info("parsed multipart form", "took", fmt.Sprintf("%.2fs", time.Since(start).Seconds()))
+
+				// Retrieve the file from the form
+				file, fh, err := r.FormFile("file")
+				if err != nil {
+					http.Error(w, "Error retrieving the file", http.StatusBadRequest)
+					return
+				}
+				defer file.Close()
+				logger.Debug("file header", "fh", fh)
+				reader = file
+			}
+		default:
+			defer r.Body.Close()
+			reader = bufio.NewReader(r.Body)
 		}
-		defer file.Close()
-		logger.Debug("file header", "fh", fh)
 
 		waitTill := time.Now().Add(waitDuration)
 		for time.Since(waitTill) < 0 {
@@ -143,7 +164,7 @@ func main() {
 				break
 			}
 
-			fmt.Fprintf(w, "\rIDLE connection, no receiver exists, waiting another %.2fs\n", time.Until(waitTill).Seconds())
+			fmt.Fprintf(w, "\rIDLE connection, no receiver found, waiting another %.2fs\n", time.Until(waitTill).Seconds())
 			w.(http.Flusher).Flush()
 			<-time.After(200 * time.Millisecond)
 		}
@@ -153,7 +174,7 @@ func main() {
 		transferred := 0
 
 		for {
-			n, err := file.Read(msg)
+			n, err := reader.Read(msg)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					if ch, ok := clients[token]; ok {
@@ -161,6 +182,7 @@ func main() {
 						ch.Close()
 						break
 					}
+					logger.Error("no token found")
 				}
 				logger.Error("while reading file, got", "err", err)
 				return
@@ -220,16 +242,19 @@ func main() {
 		w.Write([]byte("ok"))
 	})
 
+	if BuiltAt == "" {
+		BuiltAt = time.Now().Format("11:30 AM Sunday, Nov 11, 2023")
+	}
+
 	fmt.Printf(`
-███████╗███████╗ ██████╗██╗   ██╗██████╗ ███████╗    ███████╗███████╗███╗   ██╗██████╗ 
-██╔════╝██╔════╝██╔════╝██║   ██║██╔══██╗██╔════╝    ██╔════╝██╔════╝████╗  ██║██╔══██╗
-███████╗█████╗  ██║     ██║   ██║██████╔╝█████╗      ███████╗█████╗  ██╔██╗ ██║██║  ██║
-╚════██║██╔══╝  ██║     ██║   ██║██╔══██╗██╔══╝      ╚════██║██╔══╝  ██║╚██╗██║██║  ██║
-███████║███████╗╚██████╗╚██████╔╝██║  ██║███████╗    ███████║███████╗██║ ╚████║██████╔╝
-╚══════╝╚══════╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝    ╚══════╝╚══════╝╚═╝  ╚═══╝╚═════╝ 
+ ▗▄▄▖▗▄▄▄▖ ▗▄▄▖▗▖ ▗▖▗▄▄▖ ▗▄▄▄▖     ▗▄▄▖▗▄▄▄▖▗▖  ▗▖▗▄▄▄ 
+▐▌   ▐▌   ▐▌   ▐▌ ▐▌▐▌ ▐▌▐▌       ▐▌   ▐▌   ▐▛▚▖▐▌▐▌  █
+ ▝▀▚▖▐▛▀▀▘▐▌   ▐▌ ▐▌▐▛▀▚▖▐▛▀▀▘     ▝▀▚▖▐▛▀▀▘▐▌ ▝▜▌▐▌  █
+▗▄▄▞▘▐▙▄▄▖▝▚▄▄▖▝▚▄▞▘▐▌ ▐▌▐▙▄▄▖    ▗▄▄▞▘▐▙▄▄▖▐▌  ▐▌▐▙▄▄▀
 
 Built at %s
 `, BuiltAt)
 
+	logger.Info("HTTP server starting", "at", addr)
 	http.ListenAndServe(addr, mux)
 }
