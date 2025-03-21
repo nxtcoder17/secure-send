@@ -6,22 +6,21 @@ tasks:
     cmd:
       - go run ./main.go --debug
 
+  server:dev:
+    cmd:
+      - go run ./cmd/server --debug
+
   go:build:
-    silent: true
+    # silent: true
     env:
-      platform_arch:
+      GOARCH:
         sh: go env GOARCH
       built_at:
         sh: date | sed 's/\s/_/g'
-    vars:
-      platform_arch: 
-        sh: go env GOARCH
-      built_at:
-        sh: 
-    env:
-      GOARCH: "{{ .GOARCH | default .platform_arch }}"
-    cmds:
-      - go build -ldflags="-s -w -X main.BuiltAt={{.built_at}}" -o {{.binary}}-$GOARCH .
+      CGO_BUILD: 0
+    cmd:
+      # - echo "hi"
+      - go build -ldflags="-s -w -X main.BuiltAt=$build_at" -o $binary-$GOARCH ./cmd/server
 
   container:build-and-push:
     env:
@@ -29,10 +28,11 @@ tasks:
         required: true
     cmd:
       - run: go:build
-        vars:
+        env:
           GOARCH: amd64
+
       - run: go:build
-        vars:
+        env:
           GOARCH: arm64
-      # - nerdctl build --platform linux/amd64,linux/arm64 --build-arg BINARY="{{.binary}}" --output=type=image,force-compression=true,compression=zstd,compression-level=12,push=true -t {{.image}} .
-      - docker buildx build --platform linux/amd64,linux/arm64 --build-arg BINARY="{{.binary}}" -t {{.image}} . --push
+
+      - docker buildx build --platform linux/amd64,linux/arm64 --build-arg BINARY="$binary" --output=type=image,force-compression=true,compression=zstd,compression-level=12,push=true -t $image .
