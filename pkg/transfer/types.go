@@ -1,13 +1,15 @@
 package transfer
 
 import (
-	"fmt"
 	"io"
+	"sync"
 )
 
 type Sender struct {
 	io.ReadCloser
-	closed bool
+	connectionID string
+	sync.Mutex
+	subscribers []EventHandler
 }
 
 func (r *Sender) Read(p []byte) (int, error) {
@@ -15,13 +17,14 @@ func (r *Sender) Read(p []byte) (int, error) {
 }
 
 func (r *Sender) Close() error {
-	if r.closed {
-		return fmt.Errorf("already closed")
-	}
-	r.closed = true
 	return r.ReadCloser.Close()
 }
 
-func (r *Sender) IsClosed() bool {
-	return r.closed
+func (r *Sender) Subscribe(onEvent EventHandler) {
+	r.subscribers = append(r.subscribers, onEvent)
+}
+
+type Receiver struct {
+	io.Writer
+	connectionID string
 }

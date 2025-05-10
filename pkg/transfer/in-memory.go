@@ -9,26 +9,41 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/nxtcoder17/ivy"
 )
 
 type InMemoryTransferManager struct {
-	senders   map[string]Sender
-	receivers map[string]io.Writer
-	mu        sync.Mutex
+	senders map[string]*Sender
+	mu      sync.Mutex
 
 	MaxWaitDuration time.Duration
 	eventHandlers   []EventHandler
 }
 
 // StartTransfer implements TransferManager
-func (tm *InMemoryTransferManager) StartTransfer(connectionID string, writer io.Writer) error {
+func (tm *InMemoryTransferManager) StartTransfer(connectionID string, c *ivy.Context) error {
 	sender, ok := tm.senders[connectionID]
 	if !ok {
-		tm.notify(EventSenderNotFound, fmt.Sprintf("sender not found for connectionID=%v", connectionID))
-		return fmt.Errorf("no sender found")
+		tm.notify(EventSenderNotFound, "sender not found", "connectionID", connectionID)
+		return ivy.NewHTTPError(http.StatusBadRequest, "no sender found")
 	}
 
-	tm.notify(EventTransferStarted, fmt.Sprintf("transfer started for connectionID=%v", connectionID))
+	sender.Lock()
+	defer sender.Unlock()
+
+	go func() {
+		<-c.Done()
+		slog.Debug("receiver closed", "connectionID", connectionID)
+	}()
+
+	// tm.notifySender(sender, EventTransferStarted, fmt.Sprintf("transfer started for connectionID=%v", connectionID))
+	tm.notifySender(sender, EventTransferStarted, "transfer started", "connectionID", connectionID)
+	defer func() {
+		tm.CloseSender(connectionID)
+		delete(tm.senders, connectionID)
+		tm.notifySender(sender, EventTransferFinished, "transfer finished", "connectionID", connectionID)
+	}()
 
 	msg := make([]byte, 1<<8) // []byte of len 256 (2**8)
 	transferred := 0
@@ -40,40 +55,30 @@ func (tm *InMemoryTransferManager) StartTransfer(connectionID string, writer io.
 		n, err := reader.Read(msg)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if _, err := writer.Write(msg[:n]); err != nil {
+				if _, err := c.Write(msg[:n]); err != nil {
 					tm.notify(EventTransferError, err.Error())
 				}
 				transferred += n
 
-				if flusher, ok := writer.(http.Flusher); ok {
-					flusher.Flush()
-				}
-
-				tm.notify(EventTransferBytesUpdate, fmt.Sprintf("written %.2f MBs (%d bytes)", float64(transferred)/1024/1024, transferred))
+				c.Flush()
 				break
 			}
 
-			tm.notify(EventTransferError, err.Error())
+			tm.notifySender(sender, EventTransferError, err.Error())
 			slog.Error("while reading file, got", "err", err)
 			return nil
 		}
 
-		if _, err := writer.Write(msg[:n]); err != nil {
+		if _, err := c.Write(msg[:n]); err != nil {
 			tm.notify(EventTransferError, err.Error())
 		}
 		transferred += n
-		if flusher, ok := writer.(http.Flusher); ok {
-			flusher.Flush()
-		}
-
-		tm.notify(EventTransferBytesUpdate, fmt.Sprintf("written %.2f MBs (%d bytes)", float64(transferred)/1024/1024, transferred))
-		// <-time.After(500 * time.Millisecond)
+		c.Flush()
+		tm.notifySender(sender, EventTransferBytesUpdate, "transferred", "bytes", transferred)
 	}
 
-	tm.notify(EventTransferFinished, fmt.Sprintf("written %.2f MBs (%d bytes)", float64(transferred)/1024/1024, transferred))
-	tm.mu.Lock()
-	delete(tm.senders, connectionID)
-	delete(tm.receivers, connectionID)
+	tm.notifySender(sender, EventTransferFinished, "transferred", "bytes", transferred)
+	// tm.mu.Lock()
 	return nil
 }
 
@@ -82,29 +87,50 @@ func (tm *InMemoryTransferManager) Subscribe(onEvent EventHandler) {
 }
 
 // NewSender implements ConnectionManager.
-func (tm *InMemoryTransferManager) NewSender(connectionID string, sender io.ReadCloser) error {
+func (tm *InMemoryTransferManager) NewSender(connectionID string, sender io.ReadCloser) (*Sender, error) {
 	if _, ok := tm.senders[connectionID]; ok {
-		return fmt.Errorf("connectionID already in use, please use another")
-	}
-	tm.senders[connectionID] = Sender{
-		ReadCloser: sender,
-		closed:     false,
+		tm.notify(EventSenderCreationFailed, fmt.Sprintf("sender created with connectionID=%v", connectionID))
+		return nil, fmt.Errorf("connectionID already in use, please use another")
 	}
 
-	tm.notify(EventSenderCreated, fmt.Sprintf("sender created with connectionID=%v", connectionID))
-	return nil
+	s := Sender{
+		connectionID: connectionID,
+		ReadCloser:   sender,
+	}
+	tm.senders[connectionID] = &s
+
+	tm.notifySender(&s, EventSenderCreated, "sender created", "connectionID", connectionID)
+	return &s, nil
 }
 
-func (tm *InMemoryTransferManager) notify(event Event, msg string) {
+// CloseSender implements TransferManager.
+func (tm *InMemoryTransferManager) CloseSender(connectionID string) {
+	if sender, ok := tm.senders[connectionID]; ok {
+		sender.Close()
+	}
+	delete(tm.senders, connectionID)
+	tm.notify(EventTransferFinished, fmt.Sprintf("sender closed for connection ID (%s)", connectionID))
+}
+
+func (tm *InMemoryTransferManager) notify(event Event, msg string, kv ...any) {
 	for i := range tm.eventHandlers {
-		tm.eventHandlers[i](event, msg)
+		tm.eventHandlers[i](event, msg, kv...)
+	}
+}
+
+func (tm *InMemoryTransferManager) notifySender(sender *Sender, event Event, msg string, kv ...any) {
+	for i := range sender.subscribers {
+		sender.subscribers[i](event, msg, kv...)
+	}
+	for i := range tm.eventHandlers {
+		kv = append(kv, "sender", sender.connectionID)
+		tm.eventHandlers[i](event, msg, kv...)
 	}
 }
 
 func NewInMemoryTransferManager() TransferManager {
 	return &InMemoryTransferManager{
-		senders:       make(map[string]Sender),
-		receivers:     make(map[string]io.Writer),
+		senders:       make(map[string]*Sender),
 		eventHandlers: make([]EventHandler, 0, 1),
 		mu:            sync.Mutex{},
 	}

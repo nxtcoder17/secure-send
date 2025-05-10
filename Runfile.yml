@@ -2,11 +2,10 @@ env:
   binary: ./bin/secure-send
 
 tasks:
-  dev:
-    cmd:
-      - go run ./main.go --debug
-
   server:dev:
+    watch:
+      extensions:
+        - .go
     cmd:
       - go run ./cmd/server --debug
 
@@ -19,8 +18,14 @@ tasks:
         sh: date | sed 's/\s/_/g'
       CGO_BUILD: 0
     cmd:
-      # - echo "hi"
-      - go build -ldflags="-s -w -X main.BuiltAt=$build_at" -o $binary-$GOARCH ./cmd/server
+      - go build 
+          -ldflags="
+              -s 
+              -w 
+              -X main.BuiltAt=$(echo $build_at | sed 's/\s/_/g') 
+              -X main.Version=$(echo $version | sed 's/\s/_/g')
+          " 
+          -o $binary-${GOARCH} ./cmd/server
 
   container:build-and-push:
     env:

@@ -3,25 +3,35 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
-	"github.com/nxtcoder17/go.pkgs/log"
+	"github.com/nxtcoder17/fastlog"
 	"github.com/nxtcoder17/ivy"
 	"github.com/nxtcoder17/secure-send/pkg/transfer"
 )
 
-var BuiltAt string
+var (
+	BuiltAt string
+	Version string
+)
 
 func init() {
 	if BuiltAt == "" {
 		BuiltAt = time.Now().Format(time.RFC822)
+	}
+
+	if Version == "" {
+		Version = "aurora"
 	}
 }
 
 func main() {
 	addr := flag.String("addr", ":3000", "--addr [host]:<port>")
 	maxWait := flag.String("max-wait", "120s", "--max-wait <duration>")
+	debug := flag.Bool("debug", false, "--debug")
 	flag.Parse()
 
 	maxWaitDuration, err := time.ParseDuration(*maxWait)
@@ -29,7 +39,15 @@ func main() {
 		panic(err)
 	}
 
-	logger := log.New()
+	logger := fastlog.New(fastlog.Options{
+		Writer:        os.Stderr,
+		Format:        fastlog.ConsoleFormat,
+		ShowDebugLogs: *debug,
+		ShowCaller:    true,
+		EnableColors:  true,
+	})
+
+	slog.SetDefault(logger.Slog())
 
 	fmt.Printf(`
  ▗▄▄▖▗▄▄▄▖ ▗▄▄▖▗▖ ▗▖▗▄▄▖ ▗▄▄▄▖   ▗▄▄▖▗▄▄▄▖▗▖  ▗▖▗▄▄▄ 
@@ -37,18 +55,20 @@ func main() {
  ▝▀▚▖▐▛▀▀▘▐▌   ▐▌ ▐▌▐▛▀▚▖▐▛▀▀▘   ▝▀▚▖▐▛▀▀▘▐▌ ▝▜▌▐▌  █
 ▗▄▄▞▘▐▙▄▄▖▝▚▄▄▖▝▚▄▞▘▐▌ ▐▌▐▙▄▄▖  ▗▄▄▞▘▐▙▄▄▖▐▌  ▐▌▐▙▄▄▀
 
+› Version %s
 › Built on %s
 › Http Server running on %s
-`, BuiltAt, *addr)
+`, Version, BuiltAt, *addr)
 
 	tm := transfer.NewInMemoryTransferManager()
 
-	tm.Subscribe(func(event transfer.Event, msg string) {
+	tm.Subscribe(func(event transfer.Event, msg string, kv ...any) {
+		kv = append(kv, "event", event.String())
 		switch event {
 		case transfer.EventTransferStarted, transfer.EventTransferFinished:
-			logger.Info(fmt.Sprintf("[Event] %s", event.String()), "msg", msg)
+			logger.Info(msg, kv...)
 		default:
-			logger.Debug(fmt.Sprintf("[Event] %s", event.String()), "msg", msg)
+			logger.Debug(msg, kv...)
 		}
 	})
 
@@ -71,7 +91,7 @@ func main() {
 			return fmt.Errorf("invalid wait duration, must be <= %s", *maxWait)
 		}
 
-		logger.Info("sender active", "connectionID", connectionID, "wait", waitDuration)
+		logger.Info("sender active", "connectionID", connectionID, "wait", fmt.Sprintf("%ds", int64(waitDuration.Seconds())))
 
 		if err := Send(c, SendParams{
 			TransferManager: tm,
@@ -86,12 +106,13 @@ func main() {
 
 	router.Get("/receive/{connectionID}", func(c *ivy.Context) error {
 		connectionID := c.PathParam("connectionID")
-		logger.Debug("receiver active", "connectionID", connectionID)
+		logger.Info("receiver active", "connectionID", connectionID)
 
 		return tm.StartTransfer(connectionID, c)
 	})
 
 	if err := http.ListenAndServe(*addr, router); err != nil {
-		logger.Error(err, "starting http server", "addr", addr)
+		logger.Error("failed to start http server", "addr", addr, "err", err)
+		os.Exit(1)
 	}
 }

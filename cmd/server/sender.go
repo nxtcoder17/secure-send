@@ -9,24 +9,15 @@ import (
 	"github.com/nxtcoder17/secure-send/pkg/transfer"
 )
 
-// const tokenChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
-//
-// func RandStringBytes(n int) string {
-// 	b := make([]byte, n)
-// 	for i := range b {
-// 		b[i] = tokenChars[rand.IntN(len(tokenChars))]
-// 	}
-// 	return string(b)
-// }
-
 type SendParams struct {
-	transfer.TransferManager
+	TransferManager transfer.TransferManager
 	ConnectionID    string
 	MaxWaitDuration time.Duration
 }
 
 func Send(c *ivy.Context, params SendParams) error {
-	if err := params.TransferManager.NewSender(params.ConnectionID, c.Body()); err != nil {
+	sender, err := params.TransferManager.NewSender(params.ConnectionID, c.Body())
+	if err != nil {
 		return err
 	}
 
@@ -37,12 +28,25 @@ func Send(c *ivy.Context, params SendParams) error {
 	finished := make(chan bool, 1)
 
 	go func() {
-		params.TransferManager.Subscribe(func(event transfer.Event, msg string) {
+		sender.Subscribe(func(event transfer.Event, msg string, kv ...any) {
 			switch event {
 			case transfer.EventTransferStarted:
 				started <- true
 			case transfer.EventTransferBytesUpdate:
-				c.Write([]byte("\r" + msg))
+				for i := 0; i <= len(kv); i += 2 {
+					if kv[i].(string) == "bytes" {
+						value := kv[i+1].(int)
+						switch {
+						case value < 1024*1024:
+							fmt.Fprintf(c, "transferred %.2f KBs\r\n", float64(value)/1024)
+						default:
+							fmt.Fprintf(c, "transferred %.2f MBs\r\n", float64(value)/1024/1024)
+						}
+						break
+					}
+				}
+			case transfer.EventTransferError:
+				finished <- true
 			case transfer.EventTransferFinished:
 				finished <- true
 			}

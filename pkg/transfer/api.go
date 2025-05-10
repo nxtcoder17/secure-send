@@ -1,6 +1,10 @@
 package transfer
 
-import "io"
+import (
+	"io"
+
+	"github.com/nxtcoder17/ivy"
+)
 
 type Connection struct {
 	Sender   io.ReadCloser
@@ -12,15 +16,16 @@ type Event int
 const (
 	EventUnknownState Event = 0
 
-	EventSenderCreated  = 1
-	EventSenderNotFound = 2
+	EventSenderCreated        = 1
+	EventSenderCreationFailed = 2
+	EventSenderNotFound       = 3
 
-	EventReceiverCreated = 3
+	EventReceiverCreated = 4
 
-	EventTransferStarted     = 4
-	EventTransferBytesUpdate = 5
-	EventTransferError       = 6
-	EventTransferFinished    = 7
+	EventTransferStarted     = 5
+	EventTransferBytesUpdate = 6
+	EventTransferError       = 7
+	EventTransferFinished    = 8
 )
 
 func (ev Event) String() string {
@@ -44,10 +49,11 @@ func (ev Event) String() string {
 	}
 }
 
-type EventHandler func(event Event, msg string)
+type EventHandler func(event Event, msg string, kv ...any)
 
 type TransferManager interface {
-	NewSender(connectionID string, sender io.ReadCloser) error
-	StartTransfer(connectionID string, writer io.Writer) error
+	NewSender(connectionID string, sender io.ReadCloser) (*Sender, error)
+	CloseSender(connectionID string)
+	StartTransfer(connectionID string, c *ivy.Context) error
 	Subscribe(onEvent EventHandler)
 }
